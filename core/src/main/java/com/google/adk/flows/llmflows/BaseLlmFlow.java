@@ -527,38 +527,42 @@ public abstract class BaseLlmFlow implements BaseFlow {
 
   private Flowable<Event> run(
       Context spanContext, InvocationContext invocationContext, int stepsCompleted) {
-    Flowable<Event> currentStepEvents = runOneStep(spanContext, invocationContext).cache();
-    if (stepsCompleted + 1 >= maxSteps) {
-      logger.debug("Ending flow execution because max steps reached.");
-      return currentStepEvents;
-    }
-    @SuppressWarnings("deprecation") // The shim it reports is deprecated by design.
-    boolean legacyResumption = invocationContext.isLegacyResumability();
+    return Flowable.defer(
+        () -> {
+          List<Event> stepEvents = new ArrayList<>();
+          Flowable<Event> currentStepEvents =
+              runOneStep(spanContext, invocationContext).doOnNext(stepEvents::add);
+          if (stepsCompleted + 1 >= maxSteps) {
+            logger.debug("Ending flow execution because max steps reached.");
+            return currentStepEvents;
+          }
+          @SuppressWarnings("deprecation") // The shim it reports is deprecated by design.
+          boolean legacyResumption = invocationContext.isLegacyResumability();
 
-    return currentStepEvents.concatWith(
-        currentStepEvents
-            .toList()
-            .flatMapPublisher(
-                eventList -> {
-                  if (eventList.isEmpty()
-                      || Iterables.getLast(eventList).finalResponse()
-                      || Iterables.getLast(eventList).actions().endInvocation().orElse(false)) {
-                    logger.debug(
-                        "Ending flow execution based on final response, endInvocation action or"
-                            + " empty event list.");
-                    return Flowable.empty();
-                  } else if (legacyResumption && Functions.hasPendingLongRunningCall(eventList)) {
-                    // The resumable flow decides before the model call instead, in StepResume.
-                    logger.debug("Pausing flow execution on a pending long-running call.");
-                    return Flowable.empty();
-                  } else {
-                    logger.debug("Continuing to next step of the flow.");
-                    // Wait until the Runner has persisted this step's events so the next step's
-                    // request is not built from a stale session (see PersistBarrier).
-                    return PersistBarrier.awaitPersisted(invocationContext, eventList)
-                        .andThen(run(spanContext, invocationContext, stepsCompleted + 1));
-                  }
-                }));
+          return currentStepEvents.concatWith(
+              Flowable.defer(
+                  () -> {
+                    if (stepEvents.isEmpty()
+                        || Iterables.getLast(stepEvents).finalResponse()
+                        || Iterables.getLast(stepEvents).actions().endInvocation().orElse(false)) {
+                      logger.debug(
+                          "Ending flow execution based on final response, endInvocation action or"
+                              + " empty event list.");
+                      return Flowable.empty();
+                    } else if (legacyResumption
+                        && Functions.hasPendingLongRunningCall(stepEvents)) {
+                      // The resumable flow decides before the model call instead, in StepResume.
+                      logger.debug("Pausing flow execution on a pending long-running call.");
+                      return Flowable.empty();
+                    } else {
+                      logger.debug("Continuing to next step of the flow.");
+                      // Wait until the Runner has persisted this step's events so the next step's
+                      // request is not built from a stale session (see PersistBarrier).
+                      return PersistBarrier.awaitPersisted(invocationContext, stepEvents)
+                          .andThen(run(spanContext, invocationContext, stepsCompleted + 1));
+                    }
+                  }));
+        });
   }
 
   /**

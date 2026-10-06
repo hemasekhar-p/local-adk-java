@@ -59,9 +59,11 @@ import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.schedulers.Schedulers;
+import io.reactivex.rxjava3.subscribers.TestSubscriber;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import org.junit.Test;
@@ -1038,5 +1040,20 @@ public final class BaseLlmFlowTest {
     Event event = getOnlyElement(events);
     assertThat(event.content()).isEmpty();
     assertThat(event.groundingMetadata()).hasValue(groundingMetadata);
+  }
+
+  @Test
+  public void run_subscriptionDisposed_cancelsUpstreamModelStream() {
+    AtomicBoolean cancelled = new AtomicBoolean(false);
+    Flowable<LlmResponse> responseFlowable =
+        Flowable.<LlmResponse>never().doOnCancel(() -> cancelled.set(true));
+    TestLlm testLlm = new TestLlm(() -> responseFlowable);
+    InvocationContext invocationContext = createInvocationContext(createTestAgent(testLlm));
+    BaseLlmFlow baseLlmFlow = createBaseLlmFlowWithoutProcessors();
+
+    TestSubscriber<Event> subscriber = baseLlmFlow.run(invocationContext).test();
+    subscriber.cancel();
+
+    assertThat(cancelled.get()).isTrue();
   }
 }
